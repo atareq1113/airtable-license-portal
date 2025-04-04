@@ -1,0 +1,753 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Airtable License Manager</title>
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/bootstrap/5.3.0/css/bootstrap.min.css">
+    <script src="https://cdn.jsdelivr.net/npm/axios/dist/axios.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js"></script>
+    <style>
+        body {
+            padding: 20px;
+        }
+        #licenseRecordsBox {
+            max-height: 400px;
+            overflow-y: auto;
+            border: 1px solid #ccc;
+            padding: 10px;
+            margin-bottom: 20px;
+        }
+        table {
+            width: 100%;
+            border-collapse: collapse;
+        }
+        th, td {
+            border: 1px solid #ddd;
+            padding: 10px;
+            text-align: center;
+        }
+        th {
+            background-color: #f2f2f2;
+        }
+        .editable {
+            background-color: #f9f9f9;
+            cursor: pointer;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <nav class="mb-3">
+            <a href="airtable_trial_manager.html" class="btn btn-outline-primary">Trial Manager</a>
+            <a href="airtable_license_manager.html" class="btn btn-outline-secondary">License Manager</a>
+            <a href="prep2.html" class="btn btn-outline-secondary">Prep File For Resync</a>
+        </nav>
+        <h1>Airtable License Manager</h1>
+        <input type="file" id="fileInput" class="form-control mb-3" accept=".csv" onchange="handleFileUpload(event)">
+        <button class="btn btn-primary mb-3" onclick="pushToAirtable()">Push to Airtable</button>
+        <button class="btn btn-secondary mb-3" onclick="retrieveFromAirtable()">Retrieve from Airtable</button>
+        <input type="text" id="searchInput" class="form-control mb-3" placeholder="Search by Organization, Assignee, or Stripe Email" onkeyup="searchLicenseRecords()">
+        <button id="clear-button" class="btn btn-outline-secondary mb-3" onclick="clearSearch(); retrieveFromAirtable()">Clear Search</button>
+        <button class="btn btn-info mb-3" id="downloadRecordButton" style="display: none;" onclick="downloadRecord()">Download Record</button>
+        <div id="licenseRecordsBox">
+            <table>
+                <thead>
+                    <tr>
+                        <th>Organization</th>
+                        <th>Assignee</th>
+                        <th>Expiration Date</th>
+                        <th>Stripe Email</th>
+                    </tr>
+                </thead>
+                <tbody id="licenseRecordsContainer">
+                </tbody>
+            </table>
+        </div>
+        <div id="addAssigneeBox" style="display: none;">
+            <h4>Add Assignee</h4>
+            <div class="mb-3">
+                <label for="newAssigneeInput" class="form-label">Assignee Email</label>
+                <input type="text" id="newAssigneeInput" class="form-control" placeholder="Enter assignee email">
+            </div>
+            <div class="mb-3">
+                <input type="text" id="newExpirationInput" class="form-control" placeholder="Enter expiration date">
+            </div>
+            <button class="btn btn-success" onclick="addAssignee(); updateAirtable()">Add Assignee</button>
+        </div>
+
+        <button class="btn btn-success mt-5" onclick="openAddOrganizationDialog()">Add New Organization</button>
+
+        <div id="addOrganizationDialog" class="modal" tabindex="-1">
+            <div class="modal-dialog">
+                <div class="modal-content">
+                    <div class="modal-header">
+                        <h5 class="modal-title">Add New Organization</h5>
+                        <button type="button" class="btn-close" onclick="closeAddOrganizationDialog()"></button>
+                    </div>
+                    <div class="modal-body">
+                        <div class="mb-3">
+                            <label for="newOrganizationInput" class="form-label">Organization Name</label>
+                            <input type="text" id="newOrganizationInput" class="form-control" placeholder="Enter organization name">
+                        </div>
+                        <div class="mb-3">
+                            <label for="newStripeEmailInput" class="form-label">Stripe Email</label>
+                            <input type="text" id="newStripeEmailInput" class="form-control" placeholder="Enter Stripe email">
+                        </div>
+                        <div id="assigneeList">
+                            <div class="mb-3">
+                                <label for="assigneeInput0" class="form-label">Assignee Email</label>
+                                <input type="text" id="assigneeInput0" class="form-control" placeholder="Enter assignee email">
+                            </div>
+                        </div>
+                        <button class="btn btn-secondary mb-3" onclick="addAssigneeField()">Add Another Assignee</button>
+                    </div>
+                    <div class="modal-footer">
+                        <button class="btn btn-success" onclick="addOrganization()">Add Organization</button>
+                        <button class="btn btn-secondary" onclick="closeAddOrganizationDialog()">Cancel</button>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        const airtableApiKey = 'patCHbYMAKkjswgZg.d6edc3bd5fde3aa329a8628f7f8b3c7b89d1e00dfd65d7c6b445855cfe34e59e';
+        const airtableBaseId = 'appFpEywQqOssN1dh';
+        const airtableTableName = 'git-new-2';
+        const airtableChangeLogTable = 'ChangeLog';
+        let licenseRecords = [];
+        let originalLicenseRecords = [];
+        let currentOrganization = "";
+        let newAssignees = [];
+
+        function handleFileUpload(event) {
+            const file = event.target.files[0];
+            if (file) {
+                const reader = new FileReader();
+                reader.onload = function(e) {
+                    const text = e.target.result;
+                    const lines = text.split('\n');
+                    renderLicenseRecords(lines);
+                };
+                reader.readAsText(file);
+            }
+        }
+
+        // Helper function to log changes to Airtable
+        async function logChangeToAirtable(organization, action, email, licenseChange, timestamp) {
+            const record = {
+                fields: {
+                    Organization: organization,
+                    Action: action,
+                    Email: email,
+                    LicenseChange: licenseChange,
+                    Timestamp: timestamp
+                }
+            };
+
+            try {
+                await axios.post(`https://api.airtable.com/v0/${airtableBaseId}/${airtableChangeLogTable}`, { records: [record] }, {
+                    headers: {
+                        Authorization: `Bearer ${airtableApiKey}`,
+                        'Content-Type': 'application/json'
+                    }
+                });
+            } catch (error) {
+                console.error('Error logging change to Airtable:', error);
+            }
+        }
+
+        function clearSearch() {
+            document.getElementById('searchInput').value = '';
+            searchLicenseRecords();
+        }
+
+        function renderLicenseRecords(lines) {
+            const container = document.getElementById("licenseRecordsContainer");
+            container.innerHTML = "";
+            licenseRecords = [];
+            originalLicenseRecords = [];
+
+            let currentOrganization = "";
+            lines.forEach((line, index) => {
+                if (index === 0) return; // Skip header row
+                const columns = line.split(',');
+                if (columns.length >= 4) {
+                    let [organization, assignee, expiration, stripeEmail] = columns;
+                    organization = organization.trim();
+                    assignee = assignee.trim();
+                    expiration = expiration.trim();
+                    stripeEmail = stripeEmail.trim();
+
+                    // If the organization field is not empty, update the current organization
+                    if (organization && organization !== '') {
+                        currentOrganization = organization;
+                    }
+
+                    // Display organization and records as per the file structure
+                    const row = document.createElement("tr");
+                    row.innerHTML = `
+                        <td>${organization}</td>
+                        <td>${assignee}</td>
+                        <td class="editable" contenteditable="true" onblur="updateRecord('${organization}', '${assignee}', 'expiration', this.innerText)">${expiration}</td>
+                        <td class="editable" contenteditable="true" onblur="updateRecord('${organization}', '${assignee}', 'stripeEmail', this.innerText)">${stripeEmail}</td>
+                    `;
+                    container.appendChild(row);
+                    licenseRecords.push({ displayOrganization: organization || currentOrganization, assignee, expiration, stripeEmail, airtableId: null });
+                    originalLicenseRecords.push({ displayOrganization: organization || currentOrganization, assignee, expiration, stripeEmail, airtableId: null });
+                }
+            });
+        }
+
+        function openAddOrganizationDialog() {
+            const dialog = document.getElementById("addOrganizationDialog");
+            dialog.style.display = "block";
+        }
+
+        function closeAddOrganizationDialog() {
+            const dialog = document.getElementById("addOrganizationDialog");
+            dialog.style.display = "none";
+        }
+
+        async function pushToAirtable() {
+            const rateLimitDelay = 1000; // Adjust to avoid rate limits
+            let currentOrganization = "";
+            const batchSize = 10;
+
+            for (let i = 0; i < licenseRecords.length; i += batchSize) {
+                const batch = licenseRecords.slice(i, i + batchSize).map(record => {
+                    // Update currentOrganization if a new one is encountered
+                    if (record.displayOrganization && record.displayOrganization !== '') {
+                        currentOrganization = record.displayOrganization;
+                    }
+
+                    // Skip pushing records that are completely blank (i.e., blank assignee, expiration, and stripe email)
+                    if (!record.assignee && !record.expiration && !record.stripeEmail) {
+                        return null;
+                    }
+
+                    return {
+                        fields: {
+                            Organization: currentOrganization, // Assign correct organization name for Airtable
+                            Assignee: record.assignee,
+                            Expiration: record.expiration,
+                            'Stripe Email': record.stripeEmail
+                        }
+                    };
+                }).filter(record => record !== null);
+
+                if (batch.length > 0) {
+                    try {
+                        const response = await axios.post(`https://api.airtable.com/v0/${airtableBaseId}/${airtableTableName}`, { records: batch }, {
+                            headers: {
+                                Authorization: `Bearer ${airtableApiKey}`,
+                                'Content-Type': 'application/json'
+                            }
+                        });
+                        response.data.records.forEach((resRecord, index) => {
+                            licenseRecords[i + index].airtableId = resRecord.id; // Store Airtable record ID
+                        });
+
+                        // Log the resync action
+                        const timestamp = new Date().toISOString();
+                        await logChangeToAirtable(currentOrganization, 'Resync to Airtable', '', 'N/A', timestamp);
+
+                    } catch (error) {
+                        console.error('Error pushing to Airtable:', error);
+                    }
+
+                    // Delay to avoid hitting Airtable rate limits
+                    await new Promise(resolve => setTimeout(resolve, rateLimitDelay));
+                }
+            }
+
+            alert('Data pushed to Airtable successfully!');
+        }
+
+        async function retrieveFromAirtable() {
+            let allRecords = [];
+            let offset = null;
+            try {
+                do {
+                    const response = await axios.get(`https://api.airtable.com/v0/${airtableBaseId}/${airtableTableName}`, {
+                        headers: {
+                            Authorization: `Bearer ${airtableApiKey}`
+                        },
+                        params: {
+                            offset: offset
+                        }
+                    });
+                    allRecords = allRecords.concat(response.data.records);
+                    offset = response.data.offset;
+                } while (offset);
+                renderRetrievedLicenseRecords(allRecords);
+            } catch (error) {
+                console.error('Error retrieving from Airtable:', error);
+            }
+
+            alert('Data retrieved from Airtable successfully!');
+        }
+
+        function renderRetrievedLicenseRecords(records) {
+            const container = document.getElementById("licenseRecordsContainer");
+            container.innerHTML = "";
+            licenseRecords = [];
+            originalLicenseRecords = [];
+
+            let groupedRecords = {};
+            records.forEach(record => {
+                const fields = record.fields;
+                const { Organization, Assignee, Expiration, 'Stripe Email': stripeEmail } = fields;
+
+                if (Organization) {
+                    if (!groupedRecords[Organization]) {
+                        groupedRecords[Organization] = [];
+                    }
+                    groupedRecords[Organization].push({
+                        assignee: Assignee ? Assignee.trim() : "",
+                        expiration: Expiration ? Expiration.trim() : "",
+                        stripeEmail: stripeEmail ? stripeEmail.trim() : "",
+                        airtableId: record.id
+                    });
+                }
+            });
+
+            Object.keys(groupedRecords).forEach(organization => {
+                const records = groupedRecords[organization];
+
+                // Sort records: Stripe Email first, then by whether they have an expiration date
+                records.sort((a, b) => {
+                    if (a.stripeEmail) return -1;
+                    if (b.stripeEmail) return 1;
+                    if (a.expiration && !b.expiration) return 1;
+                    if (!a.expiration && b.expiration) return -1;
+                    return 0;
+                });
+
+                records.forEach((record, index) => {
+                    const row = document.createElement("tr");
+                    row.innerHTML = `
+                        <td>${index === 0 ? organization : ""}</td>
+                        <td>${record.assignee}</td>
+                        <td class="editable" contenteditable="true" onblur="updateRecord('${record.airtableId}', 'expiration', this.innerText)">${record.expiration}</td>
+                        <td class="editable" contenteditable="true" onblur="updateRecord('${record.airtableId}', 'stripeEmail', this.innerText)">${record.stripeEmail}</td>
+                    `;
+                    container.appendChild(row);
+                    licenseRecords.push({ displayOrganization: organization, assignee: record.assignee, expiration: record.expiration, stripeEmail: record.stripeEmail, airtableId: record.airtableId });
+                    originalLicenseRecords.push({ displayOrganization: organization, assignee: record.assignee, expiration: record.expiration, stripeEmail: record.stripeEmail, airtableId: record.airtableId });
+                });
+
+                // Add a blank row for separation between organizations
+                const blankRow = document.createElement("tr");
+                blankRow.innerHTML = `
+                    <td colspan="4"></td>
+                `;
+                container.appendChild(blankRow);
+            });
+        }
+
+        function searchLicenseRecords() {
+            const searchTerm = document.getElementById("searchInput").value.toLowerCase();
+            const container = document.getElementById("licenseRecordsContainer");
+            container.innerHTML = "";
+
+            if (!searchTerm) {
+                document.getElementById("addAssigneeBox").style.display = "none";
+                document.getElementById("downloadRecordButton").style.display = "none";
+                renderRetrievedLicenseRecordsFromOriginal();
+                return;
+            }
+
+            const filteredOrganizations = new Set(licenseRecords
+                .filter(record =>
+                    record.displayOrganization.toLowerCase().includes(searchTerm) ||
+                    record.assignee.toLowerCase().includes(searchTerm) ||
+                    record.stripeEmail.toLowerCase().includes(searchTerm)
+                )
+                .map(record => record.displayOrganization)
+            );
+
+            const filteredRecords = originalLicenseRecords.filter(record =>
+                filteredOrganizations.has(record.displayOrganization)
+            );
+
+            const groupedFilteredRecords = {};
+            filteredRecords.forEach(record => {
+                if (!groupedFilteredRecords[record.displayOrganization]) {
+                    groupedFilteredRecords[record.displayOrganization] = [];
+                }
+                groupedFilteredRecords[record.displayOrganization].push(record);
+            });
+
+            Object.keys(groupedFilteredRecords).forEach(organization => {
+                const records = groupedFilteredRecords[organization];
+                records.forEach((record, index) => {
+                    const row = document.createElement("tr");
+                    row.innerHTML = `
+                        <td>${index === 0 ? organization : ""}</td>
+                        <td>${record.assignee}</td>
+                        <td class="editable" contenteditable="true" onblur="updateRecord('${record.airtableId}', 'expiration', this.innerText)">${record.expiration}</td>
+                        <td class="editable" contenteditable="true" onblur="updateRecord('${record.airtableId}', 'stripeEmail', this.innerText)">${record.stripeEmail}</td>
+                    `;
+                    container.appendChild(row);
+                });
+
+                // Add a blank row for separation between organizations
+                const blankRow = document.createElement("tr");
+                blankRow.innerHTML = `
+                    <td colspan="4"></td>
+                `;
+                container.appendChild(blankRow);
+            });
+
+            // Enable adding assignee only if an organization is searched
+            currentOrganization = [...filteredOrganizations][0] || "";
+            if (currentOrganization) {
+                document.getElementById("addAssigneeBox").style.display = "block";
+                document.getElementById("downloadRecordButton").style.display = "block";
+            } else {
+                document.getElementById("addAssigneeBox").style.display = "none";
+                document.getElementById("downloadRecordButton").style.display = "none";
+            }
+        }
+
+        async function addAssignee() {
+            const assignee = document.getElementById("newAssigneeInput").value.trim();
+            const expiration = document.getElementById("newExpirationInput").value.trim();
+
+            if (!assignee || !currentOrganization) {
+                alert("Please enter an assignee email and ensure an organization is selected.");
+                return;
+            }
+
+            const previousLicenses = licenseRecords.filter(record => record.displayOrganization === currentOrganization && !record.expiration).length;
+
+            const newAssigneeRecord = {
+                displayOrganization: currentOrganization,
+                assignee,
+                expiration,
+                stripeEmail: "",
+                airtableId: null
+            };
+
+            licenseRecords.push(newAssigneeRecord);
+            newAssignees.push(newAssigneeRecord);
+
+            const container = document.getElementById("licenseRecordsContainer");
+            const row = document.createElement("tr");
+            row.innerHTML = `
+                <td></td>
+                <td>${assignee}</td>
+                <td class="editable" contenteditable="true" onblur="updateRecord(null, 'expiration', this.innerText)">${expiration}</td>
+                <td class="editable" contenteditable="true" onblur="updateRecord(null, 'stripeEmail', this.innerText)"></td>
+            `;
+            container.appendChild(row);
+
+            // Calculate license count change for logging
+            const finalLicenses = previousLicenses + 1;
+            const licenseChange = `Initial: ${previousLicenses}, Final: ${finalLicenses}, Change: +1`;
+            const timestamp = new Date().toISOString();
+            await logChangeToAirtable(currentOrganization, 'New Assignee', assignee, licenseChange, timestamp);
+
+            // Clear input fields
+            document.getElementById("newAssigneeInput").value = "";
+            document.getElementById("newExpirationInput").value = "";
+        }
+
+        async function updateAirtable() {
+            if (!currentOrganization) {
+                alert("Please search for an organization before updating Airtable.");
+                return;
+            }
+
+            const rateLimitDelay = 1000; // Adjust to avoid rate limits
+            const batchSize = 10;
+            for (let i = 0; i < newAssignees.length; i += batchSize) {
+                const batch = newAssignees.slice(i, i + batchSize).map(record => {
+                    return {
+                        fields: {
+                            Organization: currentOrganization,
+                            Assignee: record.assignee,
+                            Expiration: record.expiration,
+                            'Stripe Email': record.stripeEmail
+                        }
+                    };
+                });
+
+                try {
+                    const response = await axios.post(`https://api.airtable.com/v0/${airtableBaseId}/${airtableTableName}`, { records: batch }, {
+                        headers: {
+                            Authorization: `Bearer ${airtableApiKey}`,
+                            'Content-Type': 'application/json'
+                        }
+                    });
+                    response.data.records.forEach((resRecord, index) => {
+                        newAssignees[i + index].airtableId = resRecord.id; // Store Airtable record ID
+                    });
+                } catch (error) {
+                    console.error('Error updating Airtable:', error);
+                }
+
+                // Delay to avoid hitting Airtable rate limits
+                await new Promise(resolve => setTimeout(resolve, rateLimitDelay));
+            }
+
+            alert('New assignees added to Airtable successfully!');
+            newAssignees = [];
+        }
+
+        async function updateRecord(airtableId, field, value) {
+            if (!airtableId) {
+                console.error('Missing Airtable ID for record update.');
+                return;
+            }
+
+            const record = licenseRecords.find(r => r.airtableId === airtableId);
+            if (record) {
+                const previousLicenses = licenseRecords.filter(r => r.displayOrganization === record.displayOrganization && !r.expiration).length;
+
+                record[field] = value;
+
+                const airtableRecord = {
+                    fields: {
+                        Organization: record.displayOrganization,
+                        Assignee: record.assignee,
+                        Expiration: record.expiration,
+                        'Stripe Email': record.stripeEmail
+                    }
+                };
+
+                try {
+                    await axios.patch(`https://api.airtable.com/v0/${airtableBaseId}/${airtableTableName}/${airtableId}`, airtableRecord, {
+                        headers: {
+                            Authorization: `Bearer ${airtableApiKey}`,
+                            'Content-Type': 'application/json'
+                        }
+                    });
+                    alert('Record updated successfully in Airtable!');
+
+                    // Calculate license count change for logging
+                    const finalLicenses = licenseRecords.filter(r => r.displayOrganization === record.displayOrganization && !r.expiration).length;
+                    const licenseChange = `Initial: ${previousLicenses}, Final: ${finalLicenses}, Change: ${(previousLicenses < finalLicenses) ? '+1' : '-1'}`;
+                    const timestamp = new Date().toISOString();
+                    await logChangeToAirtable(record.displayOrganization, `Updated ${field}`, record.assignee, licenseChange, timestamp);
+                } catch (error) {
+                    console.error('Error updating Airtable:', error);
+                }
+            }
+        }
+
+        function renderRetrievedLicenseRecordsFromOriginal() {
+            const container = document.getElementById("licenseRecordsContainer");
+            container.innerHTML = "";
+            const groupedRecords = {};
+
+            originalLicenseRecords.forEach(record => {
+                if (!groupedRecords[record.displayOrganization]) {
+                    groupedRecords[record.displayOrganization] = [];
+                }
+                groupedRecords[record.displayOrganization].push(record);
+            });
+
+            Object.keys(groupedRecords).forEach(organization => {
+                const records = groupedRecords[organization];
+                records.forEach((record, index) => {
+                    const row = document.createElement("tr");
+                    row.innerHTML = `
+                        <td>${index === 0 ? organization : ""}</td>
+                        <td>${record.assignee}</td>
+                        <td class="editable" contenteditable="true" onblur="updateRecord('${record.airtableId}', 'expiration', this.innerText)">${record.expiration}</td>
+                        <td class="editable" contenteditable="true" onblur="updateRecord('${record.airtableId}', 'stripeEmail', this.innerText)">${record.stripeEmail}</td>
+                    `;
+                    container.appendChild(row);
+                });
+
+                // Add a blank row for separation between organizations
+                const blankRow = document.createElement("tr");
+                blankRow.innerHTML = `
+                    <td colspan="4"></td>
+                `;
+                container.appendChild(blankRow);
+            });
+        }
+
+        function addAssigneeField() {
+            const assigneeList = document.getElementById("assigneeList");
+            const newIndex = assigneeList.children.length;
+            const newField = document.createElement("div");
+            newField.classList.add("mb-3");
+            newField.innerHTML = `
+                <label for="assigneeInput${newIndex}" class="form-label">Assignee Email</label>
+                <input type="text" id="assigneeInput${newIndex}" class="form-control" placeholder="Enter assignee email">
+            `;
+            assigneeList.appendChild(newField);
+        }
+
+        async function addOrganization() {
+            const organization = document.getElementById("newOrganizationInput").value.trim();
+            const stripeEmail = document.getElementById("newStripeEmailInput").value.trim();
+            const assignees = [];
+
+            for (let i = 0; i < document.getElementById("assigneeList").children.length; i++) {
+                const assigneeInput = document.getElementById(`assigneeInput${i}`).value.trim();
+                if (assigneeInput) {
+                    assignees.push(assigneeInput);
+                }
+            }
+
+            if (!organization || !stripeEmail || assignees.length === 0) {
+                alert("Please enter organization name, Stripe email, and at least one assignee.");
+                return;
+            }
+
+            // Calculate license count change for logging
+            const initialLicenseCount = 0;
+            const finalLicenseCount = assignees.length;
+            const licenseChange = `Initial: ${initialLicenseCount}, Final: ${finalLicenseCount}, Change: +${finalLicenseCount}`;
+
+            // Log the new organization action
+            const timestamp = new Date().toISOString();
+            await logChangeToAirtable(organization, 'New Organization', stripeEmail, licenseChange, timestamp);
+
+            // Add to Airtable
+            const rateLimitDelay = 1000; // Adjust to avoid rate limits
+            const batchSize = 10;
+            for (let i = 0; i < assignees.length; i += batchSize) {
+                const batch = assignees.slice(i, i + batchSize).map((assignee, index) => {
+                    return {
+                        fields: {
+                            Organization: organization,
+                            Assignee: assignee,
+                            Expiration: "",
+                            'Stripe Email': index === 0 ? stripeEmail : "" // Add Stripe email only to the first record
+                        }
+                    };
+                });
+
+                try {
+                    const response = await axios.post(`https://api.airtable.com/v0/${airtableBaseId}/${airtableTableName}`, { records: batch }, {
+                        headers: {
+                            Authorization: `Bearer ${airtableApiKey}`,
+                            'Content-Type': 'application/json'
+                        }
+                    });
+                    response.data.records.forEach((resRecord, index) => {
+                        const newRecord = {
+                            displayOrganization: organization,
+                            assignee: assignees[i + index],
+                            expiration: "",
+                            stripeEmail: index === 0 ? stripeEmail : "",
+                            airtableId: resRecord.id
+                        };
+                        licenseRecords.push(newRecord);
+                        originalLicenseRecords.push(newRecord);
+                    });
+                } catch (error) {
+                    console.error('Error adding organization to Airtable:', error);
+                }
+
+                // Delay to avoid hitting Airtable rate limits
+                await new Promise(resolve => setTimeout(resolve, rateLimitDelay));
+            }
+
+            // Update the UI
+            renderRetrievedLicenseRecordsFromOriginal();
+
+            // Clear input fields
+            closeAddOrganizationDialog();
+            document.getElementById("newOrganizationInput").value = "";
+            document.getElementById("newStripeEmailInput").value = "";
+            document.getElementById("assigneeList").innerHTML = `
+                <div class="mb-3">
+                    <label for="assigneeInput0" class="form-label">Assignee Email</label>
+                    <input type="text" id="assigneeInput0" class="form-control" placeholder="Enter assignee email">
+                </div>
+            `;
+        }
+
+        function downloadRecord() {
+            const { jsPDF } = window.jspdf;
+            const doc = new jsPDF();
+
+            const organization = currentOrganization;
+            const organizationRecords = licenseRecords.filter(record => record.displayOrganization === organization);
+
+            if (organizationRecords.length === 0) {
+                alert('No records found for this organization.');
+                return;
+            }
+
+            // Organization name
+            doc.setFontSize(26);
+            doc.setFont('helvetica', 'bold');
+            doc.text(organization, 10, 20);
+            doc.setLineWidth(0.5);
+            doc.line(10, 25, 200, 25);
+
+            // Billing email section
+            const billingEmail = organizationRecords.find(record => record.stripeEmail)?.stripeEmail || "N/A";
+            doc.setFontSize(20);
+            doc.setFont('helvetica', 'bold');
+            doc.text('Billing Email:', 10, 35);
+            doc.setFont('helvetica', 'normal');
+            doc.setFontSize(16);
+            doc.text(billingEmail, 10, 45);
+            doc.setLineWidth(0.2);
+            doc.line(10, 50, 200, 50);
+
+            let yOffset = 60;
+            const pageHeight = doc.internal.pageSize.height;
+
+            function addNewPage() {
+                doc.addPage();
+                yOffset = 20; // Reset yOffset for the new page
+            }
+
+            // Active licenses section
+            doc.setFontSize(20);
+            doc.setFont('helvetica', 'bold');
+            doc.text('Active Licenses:', 10, yOffset);
+            yOffset += 10;
+            doc.setFont('helvetica', 'normal');
+            doc.setFontSize(16);
+
+            if (organizationRecords.filter(record => !record.expiration).length > 0) {
+                organizationRecords.filter(record => !record.expiration).forEach((record, index) => {
+                    if (yOffset > pageHeight - 20) addNewPage();
+                    doc.text(`${index + 1}. ${record.assignee}`, 10, yOffset);
+                    yOffset += 10;
+                });
+            } else {
+                if (yOffset > pageHeight - 20) addNewPage();
+                doc.text('None', 10, yOffset);
+                yOffset += 10;
+            }
+
+            // Expired/expiring licenses section
+            doc.setFontSize(20);
+            doc.setFont('helvetica', 'bold');
+            if (yOffset > pageHeight - 20) addNewPage();
+            doc.text('Expired/Expiring Licenses:', 10, yOffset);
+            yOffset += 10;
+            doc.setFont('helvetica', 'normal');
+            doc.setFontSize(16);
+
+            if (organizationRecords.filter(record => record.expiration).length > 0) {
+                organizationRecords.filter(record => record.expiration).forEach((record, index) => {
+                    if (yOffset > pageHeight - 20) addNewPage();
+                    doc.text(`${index + 1}. ${record.assignee} (Expires: ${record.expiration})`, 10, yOffset);
+                    yOffset += 10;
+                });
+            } else {
+                if (yOffset > pageHeight - 20) addNewPage();
+                doc.text('None', 10, yOffset);
+                yOffset += 10;
+            }
+
+            doc.save(`${organization}_record.pdf`);
+        }
+    </script>
+</body>
+</html>
