@@ -1,0 +1,323 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Airtable Trial Manager</title>
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/bootstrap/5.3.0/css/bootstrap.min.css">
+    <script src="https://cdn.jsdelivr.net/npm/axios/dist/axios.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+    <style>
+        body {
+            padding: 20px;
+        }
+        .badge-converted {
+            background-color: #28a745;
+        }
+        .badge-denied {
+            background-color: #dc3545;
+        }
+        #recordsBox {
+            max-height: 400px;
+            overflow-y: auto;
+            border: 1px solid #ccc;
+            padding: 10px;
+            margin-bottom: 20px;
+        }
+        table {
+            width: 100%;
+            border-collapse: collapse;
+        }
+        th, td {
+            border: 1px solid #ddd;
+            padding: 10px;
+            text-align: center;
+        }
+        th {
+            background-color: #f2f2f2;
+        }
+    </style>
+</head>
+<body>
+    
+<nav class="mb-3">
+    <a href="airtable_trial_manager.html" class="btn btn-outline-primary">Trial Manager</a>
+    <a href="airtable_license_manager.html" class="btn btn-outline-secondary">License Manager</a>
+</nav>
+<div class="container">
+        <h1>Airtable Trial Manager</h1>
+        <input type="text" id="searchBar" class="form-control mb-3" placeholder="Search by email..." oninput="filterResults()">
+        <div id="recordsBox">
+            <table>
+                <thead>
+                    <tr>
+                        <th>Email (<span id="emailCount">0</span>)</th>
+                        <th>Timestamp</th>
+                        <th>Tags</th>
+                        <th>Trial Created (<span id="createdCount">0</span>)</th>
+                        <th>Trial Converted (<span id="convertedCount">0</span>)</th>
+                        <th>Actions</th>
+                    </tr>
+                </thead>
+                <tbody id="recordsContainer">
+                </tbody>
+            </table>
+        </div>
+        <div class="row mb-3">
+            <div class="col-md-6">
+                <label for="startDate">Start Date:</label>
+                <input type="date" id="startDate" class="form-control">
+            </div>
+            <div class="col-md-6">
+                <label for="endDate">End Date:</label>
+                <input type="date" id="endDate" class="form-control">
+            </div>
+            <div class="col-md-12 mt-3">
+                <button class="btn btn-primary" onclick="handleSearch()">Search</button>
+            </div>
+        </div>
+        <canvas id="trialsChart" width="400" height="200" class="mb-3"></canvas>
+        <canvas id="trialsPieChart" width="300" height="150" class="mb-3"></canvas>
+        <p id="noDataMessage" class="text-center text-muted" style="display: none;">No data available for the selected date range.</p>
+    </div>
+
+    <script>
+        const airtableApiKey = 'patCHbYMAKkjswgZg.d6edc3bd5fde3aa329a8628f7f8b3c7b89d1e00dfd65d7c6b445855cfe34e59e';
+        const airtableBaseId = 'appFpEywQqOssN1dh';
+        const airtableTableName = 'git-new';
+        let records = [];
+        let trialsChart;
+        let trialsPieChart;
+
+        document.addEventListener("DOMContentLoaded", () => {
+            fetchAirtableData();
+        });
+
+        function fetchAirtableData() {
+            let offset = '';
+            let allRecords = [];
+
+            function fetchBatch() {
+                const url = `https://api.airtable.com/v0/${airtableBaseId}/${airtableTableName}${offset ? `?offset=${offset}` : ''}`;
+                axios.get(url, {
+                    headers: {
+                        Authorization: `Bearer ${airtableApiKey}`
+                    }
+                })
+                .then(response => {
+                    allRecords = allRecords.concat(response.data.records);
+                    if (response.data.offset) {
+                        offset = response.data.offset;
+                        fetchBatch();
+                    } else {
+                        records = allRecords.map(record => {
+                            let timestamp = record.fields.Timestamp || '';
+                            if (timestamp) {
+                                // Adjust the date parsing based on your Airtable date format: dd/Mon/yyyy:hh:mm:ss +0000
+                                try {
+                                    const [day, monthStr, rest] = timestamp.split('/');
+                                    const [year] = rest.split(':');
+                                    const monthMap = {
+                                        Jan: '01', Feb: '02', Mar: '03', Apr: '04', May: '05', Jun: '06',
+                                        Jul: '07', Aug: '08', Sep: '09', Oct: '10', Nov: '11', Dec: '12'
+                                    };
+                                    const month = monthMap[monthStr];
+                                    timestamp = `${year}-${month}-${day}`;
+                                } catch (e) {
+                                    console.error('Error parsing timestamp:', e);
+                                    timestamp = '';
+                                }
+                            }
+                            return {
+                                email: record.fields.Email || '',
+                                timestamp,
+                                status: record.fields.Tag || '',
+                                url: record.fields.URL || '',
+                                trialCreated: record.fields['Trial Created'] ? '✔️' : '',
+                                trialConverted: record.fields['Trial Converted'] ? '✔️' : ''
+                            };
+                        });
+                        renderRecords(records);
+                        renderChart(records);
+                        renderPieChart(records);
+                    }
+                })
+                .catch(error => {
+                    console.error('Error fetching Airtable data:', error);
+                });
+            }
+
+            fetchBatch();
+        }
+
+        function renderRecords(data) {
+            const container = document.getElementById("recordsContainer");
+            container.innerHTML = "";
+
+            const emailCount = data.length;
+            const createdCount = data.filter(record => record.trialCreated === '✔️').length;
+            const convertedCount = data.filter(record => record.trialConverted === '✔️').length;
+            document.getElementById("emailCount").innerText = emailCount;
+            document.getElementById("createdCount").innerText = createdCount;
+            document.getElementById("convertedCount").innerText = convertedCount;
+
+            data.forEach(record => {
+                const row = document.createElement("tr");
+                row.innerHTML = `
+                    <td>${record.email}</td>
+                    <td>${record.timestamp}</td>
+                    <td class="${getBadgeClass(record.status)}">${record.status}</td>
+                    <td>${record.trialCreated}</td>
+                    <td>${record.trialConverted}</td>
+                    <td><a href="${record.url}" class="btn btn-primary btn-sm" target="_blank">View Ticket</a></td>
+                `;
+                container.appendChild(row);
+            });
+        }
+
+        function handleSearch() {
+            renderChart(records);
+            renderPieChart(records);
+        }
+
+        function renderChart(data) {
+            const ctx = document.getElementById('trialsChart').getContext('2d');
+            const trialRequested = {};
+            const trialCreated = {};
+
+            const startDate = document.getElementById("startDate").value;
+            const endDate = document.getElementById("endDate").value;
+
+            data.forEach(record => {
+                const date = record.timestamp;
+                if (date) {
+                    const parsedDate = new Date(date); // Parsing date in yyyy-mm-dd format
+                    if ((!startDate || parsedDate >= new Date(startDate)) && (!endDate || parsedDate <= new Date(endDate))) {
+                        trialRequested[date] = (trialRequested[date] || 0) + 1;
+                        if (record.trialCreated === '✔️') {
+                            trialCreated[date] = (trialCreated[date] || 0) + 1;
+                        }
+                    }
+                }
+            });
+
+            const labels = Array.from(new Set([...Object.keys(trialRequested), ...Object.keys(trialCreated)])).sort((a, b) => new Date(a) - new Date(b));
+            const requestedData = labels.map(label => trialRequested[label] || 0);
+            const createdData = labels.map(label => trialCreated[label] || 0);
+
+            if (trialsChart) {
+                trialsChart.destroy();
+            }
+
+            if (labels.length === 0) {
+                document.getElementById('trialsChart').style.display = 'none';
+                document.getElementById('noDataMessage').style.display = 'block';
+            } else {
+                document.getElementById('trialsChart').style.display = 'block';
+                document.getElementById('noDataMessage').style.display = 'none';
+                trialsChart = new Chart(ctx, {
+                    type: 'line',
+                    data: {
+                        labels: labels,
+                        datasets: [
+                            {
+                                label: 'Trials Requested',
+                                data: requestedData,
+                                borderColor: 'rgba(75, 192, 192, 1)',
+                                borderWidth: 2,
+                                fill: false
+                            },
+                            {
+                                label: 'Trials Created',
+                                data: createdData,
+                                borderColor: 'rgba(255, 99, 132, 1)',
+                                borderWidth: 2,
+                                fill: false
+                            }
+                        ]
+                    },
+                    options: {
+                        responsive: true,
+                        scales: {
+                            x: {
+                                title: {
+                                    display: true,
+                                    text: 'Time'
+                                }
+                            },
+                            y: {
+                                title: {
+                                    display: true,
+                                    text: 'Number of Trials'
+                                }
+                            }
+                        }
+                    }
+                });
+            }
+        }
+
+        function renderPieChart(data) {
+            const ctx = document.getElementById('trialsPieChart').getContext('2d');
+            const startDate = document.getElementById("startDate").value;
+            const endDate = document.getElementById("endDate").value;
+
+            let createdCount = 0;
+            let convertedCount = 0;
+
+            data.forEach(record => {
+                const date = record.timestamp;
+                if (date) {
+                    const parsedDate = new Date(date); // Parsing date in yyyy-mm-dd format
+                    if ((!startDate || parsedDate >= new Date(startDate)) && (!endDate || parsedDate <= new Date(endDate))) {
+                        if (record.trialCreated === '✔️') {
+                            createdCount++;
+                        }
+                        if (record.trialConverted === '✔️') {
+                            convertedCount++;
+                        }
+                    }
+                }
+            });
+
+            if (trialsPieChart) {
+                trialsPieChart.destroy();
+            }
+
+            trialsPieChart = new Chart(ctx, {
+                type: 'pie',
+                data: {
+                    labels: ['Trials Created', 'Trials Converted'],
+                    datasets: [{
+                        data: [createdCount, convertedCount],
+                        backgroundColor: ['rgba(75, 192, 192, 0.7)', 'rgba(255, 99, 132, 0.7)'],
+                        borderColor: ['rgba(75, 192, 192, 1)', 'rgba(255, 99, 132, 1)'],
+                        borderWidth: 1
+                    }]
+                },
+                options: {
+                    responsive: true,
+                    plugins: {
+                        legend: {
+                            display: true,
+                            position: 'top'
+                        }
+                    }
+                }
+            });
+        }
+
+        function getBadgeClass(status) {
+            if (status === "Trial Converted") return "badge-converted";
+            if (status === "Trial Denied") return "badge-denied";
+            return "badge-secondary";
+        }
+
+        function filterResults() {
+            const searchValue = document.getElementById("searchBar").value.toLowerCase();
+            const filteredData = records.filter(record => record.email.toLowerCase().includes(searchValue));
+            renderRecords(filteredData);
+        }
+    </script>
+</body>
+</html>
