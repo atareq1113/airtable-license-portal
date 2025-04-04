@@ -1,0 +1,169 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>CSV Prep</title>
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/bootstrap/5.3.0/css/bootstrap.min.css">
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/PapaParse/5.3.0/papaparse.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/FileSaver.js/2.0.5/FileSaver.min.js"></script>
+    <style>
+        body {
+            padding: 20px;
+        }
+        .file-input {
+            margin-bottom: 15px;
+        }
+        #resultBox {
+            max-height: 400px;
+            overflow-y: auto;
+            border: 1px solid #ccc;
+            padding: 10px;
+            margin-top: 20px;
+        }
+    </style>
+</head>
+<body>
+    
+    <nav class="mb-3">
+        <a href="airtable_trial_manager.html" class="btn btn-outline-primary">Trial Manager</a>
+        <a href="airtable_license_manager.html" class="btn btn-outline-secondary">License Manager</a>
+    </nav>
+
+    <div class="container">
+        <h1 class="mb-4">CSV Prep For Airtable Resync</h1>
+        
+        <!-- Form to select files and specify output file names -->
+        <form id="fileForm" class="mb-4">
+            <div class="file-input">
+                <label for="inputFile" class="form-label">Select License CSV File:</label>
+                <input type="file" id="inputFile" class="form-control" accept=".csv" required>
+            </div>
+
+            <div class="file-input">
+                <label for="outputFile" class="form-label">Specify Name for Output File(this one does not matter):</label>
+                <input type="text" id="outputFile" class="form-control" placeholder="e.g., reorganized_customers.csv" required>
+            </div>
+
+            <div class="file-input">
+                <label for="stripeEmailsFile" class="form-label">Select Stripe Emails CSV File:</label>
+                <input type="file" id="stripeEmailsFile" class="form-control" accept=".csv" required>
+            </div>
+
+            <div class="file-input">
+                <label for="outputCorrectedFile" class="form-label">Specify Name for Corrected Output File (this is the one that matters):</label>
+                <input type="text" id="outputCorrectedFile" class="form-control" placeholder="e.g., output_corrected.csv" required>
+            </div>
+
+            <div class="file-input">
+                <label for="unmatchedEmailsFile" class="form-label">Specify Name for Unmatched Emails File:</label>
+                <input type="text" id="unmatchedEmailsFile" class="form-control" placeholder="e.g., unmatched_stripe_emails.csv" required>
+            </div>
+
+            <button type="button" class="btn btn-primary mt-3" onclick="processFiles()">Prep Files</button>
+        </form>
+
+        <div id="resultBox" class="alert alert-info" role="alert">
+            <p id="result">Upload your files and click "Prep Files" to start processing.</p>
+        </div>
+    </div>
+
+    <script>
+        function processFiles() {
+            const inputFile = document.getElementById('inputFile').files[0];
+            const outputFile = document.getElementById('outputFile').value;
+            const stripeEmailsFile = document.getElementById('stripeEmailsFile').files[0];
+            const outputCorrectedFile = document.getElementById('outputCorrectedFile').value;
+            const unmatchedEmailsFile = document.getElementById('unmatchedEmailsFile').value;
+
+            if (!inputFile || !stripeEmailsFile || !outputFile || !outputCorrectedFile || !unmatchedEmailsFile) {
+                document.getElementById('result').textContent = "Please fill all fields and select both files.";
+                return;
+            }
+
+            Papa.parse(inputFile, {
+                header: true,
+                complete: (inputResults) => {
+                    Papa.parse(stripeEmailsFile, {
+                        header: true,
+                        complete: (stripeResults) => {
+                            analyzeData(inputResults.data, stripeResults.data, outputFile, outputCorrectedFile, unmatchedEmailsFile);
+                        }
+                    });
+                }
+            });
+        }
+
+        function analyzeData(inputData, stripeEmailsData, outputFile, outputCorrectedFile, unmatchedEmailsFile) {
+            inputData.forEach(row => {
+                row['Organization'] = row['Organization'] || row['Principle'] || row['Email'];
+            });
+
+            let filteredData = inputData.filter(row => row['Billing'] === 'checked' || row['Expiring'] === 'checked');
+
+            filteredData.forEach(row => {
+                row['Organization'] = row['Organization'] ? row['Organization'].trim().toLowerCase() : '';
+            });
+
+            let organizationData = {};
+            filteredData.forEach(row => {
+                const organization = row['Organization'];
+                if (!organizationData[organization]) {
+                    organizationData[organization] = { emails: [], expirationDates: [], stripeEmail: row['Stripe Email'] || '' };
+                }
+                organizationData[organization].emails.push(row['Email']);
+                organizationData[organization].expirationDates.push(row['Expiration Date']);
+            });
+
+            let outputRows = [['Organization', 'Assignee', 'Expiration', 'Stripe Email']];
+            for (const [organization, data] of Object.entries(organizationData)) {
+                const { emails, expirationDates, stripeEmail } = data;
+                const primaryEmail = stripeEmail || (emails[0] || '');
+                
+                emails.forEach((email, index) => {
+                    outputRows.push([
+                        index === 0 ? organization : '',
+                        email,
+                        expirationDates[index] || '',
+                        index === 0 ? primaryEmail : ''
+                    ]);
+                });
+                outputRows.push(['', '', '', '']);
+            }
+
+            saveCsv(outputRows, outputFile);
+
+            const actualStripeEmails = new Set(stripeEmailsData.map(row => row['Email']?.trim().toLowerCase()));
+            let incorrectEmails = [];
+            let correctedRows = outputRows.map(row => [...row, 'Email Status']);
+
+            for (let i = 1; i < correctedRows.length; i++) {
+                const organization = correctedRows[i][0];
+                const stripeEmail = correctedRows[i][3]?.trim().toLowerCase();
+
+                if (organization && stripeEmail && !actualStripeEmails.has(stripeEmail)) {
+                    correctedRows[i][4] = 'incorrect email';
+                    incorrectEmails.push([stripeEmail]);
+                } else if (organization && !stripeEmail) {
+                    correctedRows[i][4] = 'no stripe email provided';
+                } else {
+                    correctedRows[i][4] = '';
+                }
+            }
+
+            saveCsv(correctedRows, outputCorrectedFile);
+            if (incorrectEmails.length) {
+                saveCsv([['Incorrect Stripe Email'], ...incorrectEmails], unmatchedEmailsFile);
+            }
+
+            document.getElementById('result').textContent = "Files processed and saved successfully!";
+        }
+
+        function saveCsv(data, filename) {
+            const csv = Papa.unparse(data);
+            const blob = new Blob([csv], { type: "text/csv;charset=utf-8;" });
+            saveAs(blob, filename);
+        }
+    </script>
+</body>
+</html>
